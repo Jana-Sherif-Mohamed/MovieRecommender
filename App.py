@@ -8,18 +8,16 @@ from sklearn.metrics.pairwise import cosine_similarity
 from scipy.sparse.linalg import svds
 from sklearn.model_selection import train_test_split
 
-# ─── Page Config ──────────────────────────────────────────────────────────────
-st.title("🎬 Movie Recommendation System")
-st.caption("Hybrid: Collaborative Filtering + Content-Based Filtering")
+# Page Config
+st.title("Movie Recommendation System")
 st.divider()
 
-# ─── Helper ───────────────────────────────────────────────────────────────────
 def clean_genres(text):
     text = str(text).lower().replace('|', ' ')
     text = re.sub(r'[^a-z ]', ' ', text)
     return re.sub(r'\s+', ' ', text).strip()
 
-# ─── Load & Train ─────────────────────────────────────────────────────────────
+# Load & Train
 @st.cache_resource(show_spinner=False)
 def setup():
     movies  = pd.read_csv('movies.csv')
@@ -36,10 +34,10 @@ def setup():
     ratings = ratings[ratings['movieId'].isin(popular)]
     movies  = movies[movies['movieId'].isin(popular)]
 
-    # ── Train / Test split ────────────────────────────────────────────────────
+    # Train / Test split
     train_df, test_df = train_test_split(ratings, test_size=0.2, random_state=42)
 
-    # ── Build user-item matrix from TRAIN only ────────────────────────────────
+    # Build user-item matrix from TRAIN only
     all_users  = sorted(ratings['userId'].unique())
     all_movies = sorted(ratings['movieId'].unique())
 
@@ -63,7 +61,7 @@ def setup():
     sigma_diag   = np.diag(sigma)
     pred_matrix  = user_mean[:, np.newaxis] + U @ sigma_diag @ Vt
 
-    # ── Evaluate on test set ──────────────────────────────────────────────────
+    # Evaluate on test set
     actual, estimated = [], []
     for row in test_df.itertuples():
         if row.userId in user_idx and row.movieId in movie_idx:
@@ -75,7 +73,7 @@ def setup():
     rmse = float(np.sqrt(mean_squared_error(actual, estimated)))
     mae  = float(mean_absolute_error(actual, estimated))
 
-    # ── Content-Based setup ───────────────────────────────────────────────────
+    # Content-Based setup
     mc      = movies[['movieId', 'title', 'genres']].drop_duplicates().reset_index(drop=True)
     tfidf   = TfidfVectorizer(stop_words='english').fit_transform(mc['genres'].fillna(''))
     cos_sim = cosine_similarity(tfidf, tfidf)
@@ -86,16 +84,15 @@ def setup():
             mc, cos_sim, idx_map,
             rmse, mae)
 
-with st.spinner("Loading model..."):
+with st.spinner():
     (movies, ratings, pred_matrix,
      user_idx, movie_idx, user_mean,
      mc, cos_sim, idx_map,
      rmse, mae) = setup()
 
-st.success("✅ Ready!")
 st.divider()
 
-# ─── Hybrid Recommender ───────────────────────────────────────────────────────
+# Hybrid Recommender
 def hybrid(user_id, title, n=10, cf_w=0.6, cb_w=0.4):
     # Movies this user hasn't rated
     watched     = set(ratings[ratings['userId'] == user_id]['movieId'].values)
@@ -146,7 +143,7 @@ def hybrid(user_id, title, n=10, cf_w=0.6, cb_w=0.4):
         })
     return pd.DataFrame(rows)
 
-# ─── UI ───────────────────────────────────────────────────────────────────────
+# UI
 col1, col2 = st.columns(2)
 with col1:
     user_id = st.number_input("User ID", min_value=1, max_value=943, value=1)
