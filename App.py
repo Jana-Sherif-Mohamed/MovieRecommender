@@ -10,7 +10,6 @@ from sklearn.model_selection import train_test_split
 
 # Page Config
 st.title("Movie Recommendation System")
-st.divider()
 
 def clean_genres(text):
     text = str(text).lower().replace('|', ' ')
