@@ -3,136 +3,121 @@ import pandas as pd
 import numpy as np
 import re
 from surprise import Dataset, Reader, SVD
-from surprise.model_selection import train_test_split
-from sklearn.metrics import root_mean_squared_error, mean_absolute_error
+from surprise.model_selection import train_test_split as surprise_split
+from sklearn.metrics import mean_squared_error, mean_absolute_error
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
+#  Page Config
+st.set_page_config(page_title="Movie Recommender", layout="centered")
 st.title("Movie Recommendation System")
+st.caption("Hybrid: Collaborative Filtering + Content-Based Filtering")
+st.divider()
 
-# clean genres text
+# Helper Functions
 def clean_genres(text):
     text = str(text).lower().replace('|', ' ')
     text = re.sub(r'[^a-z ]', ' ', text)
     return re.sub(r'\s+', ' ', text).strip()
 
-# extract year from title
-def extract_year(title):
-    match = re.search(r'\((\d{4})\)', str(title))
-    if match:
-        return int(match.group(1))
-    return np.nan
-
-# clean title by removing year
-def clean_title(title):
-    title = re.sub(r'\(\d{4}\)', '', str(title))
-    return title.strip().lower()
-
-# load data and train model
-@st.cache_data
-def load_and_train():
+# Load Data & Train Model
+@st.cache_resource(show_spinner=False)
+def setup():
     movies  = pd.read_csv('movies.csv')
     ratings = pd.read_csv('ratings.csv')
-
     ratings.drop(columns=['timestamp'], inplace=True)
 
-    movies['genres']      = movies['genres'].apply(clean_genres)
-    movies['year']        = movies['title'].apply(extract_year)
-    movies['clean_title'] = movies['title'].apply(clean_title)
+    movies['genres'] = movies['genres'].apply(clean_genres)
 
-    # filter popular movies
-    rating_count   = ratings.groupby('movieId')['rating'].count()
-    popular_movies = rating_count[rating_count >= 20].index
-    ratings = ratings[ratings['movieId'].isin(popular_movies)]
-    movies  = movies[movies['movieId'].isin(popular_movies)]
+    # Keep movies with 20+ ratings
+    popular = ratings.groupby('movieId')['rating'].count()
+    popular = popular[popular >= 20].index
+    ratings = ratings[ratings['movieId'].isin(popular)]
+    movies  = movies[movies['movieId'].isin(popular)]
 
-    # train SVD model
-    reader        = Reader(rating_scale=(1, 5))
-    surprise_data = Dataset.load_from_df(ratings[['userId', 'movieId', 'rating']], reader)
-    trainset, testset = train_test_split(surprise_data, test_size=0.2, random_state=42)
-    model = SVD(n_factors=50, n_epochs=20, random_state=42)
-    model.fit(trainset)
-    predictions = model.test(testset)
+    # Train SVD
+    reader  = Reader(rating_scale=(1, 5))
+    data    = Dataset.load_from_df(ratings[['userId', 'movieId', 'rating']], reader)
+    train, test = surprise_split(data, test_size=0.2, random_state=42)
+    svd     = SVD(n_factors=50, n_epochs=20, random_state=42)
+    svd.fit(train)
+    preds   = svd.test(test)
 
-    # content-based setup
-    movies_content = movies[['movieId', 'title', 'genres']].drop_duplicates().reset_index(drop=True)
-    movies_content['genres'] = movies_content['genres'].fillna('')
-    tfidf_matrix = TfidfVectorizer(stop_words='english').fit_transform(movies_content['genres'])
-    cosine_sim   = cosine_similarity(tfidf_matrix, tfidf_matrix)
-    indices      = pd.Series(movies_content.index, index=movies_content['title']).drop_duplicates()
+    # Content-Based
+    mc      = movies[['movieId', 'title', 'genres']].drop_duplicates().reset_index(drop=True)
+    tfidf   = TfidfVectorizer(stop_words='english').fit_transform(mc['genres'].fillna(''))
+    cos_sim = cosine_similarity(tfidf, tfidf)
+    idx_map = pd.Series(mc.index, index=mc['title']).drop_duplicates()
 
-    return movies, ratings, model, movies_content, cosine_sim, indices, predictions
+    return movies, ratings, svd, mc, cos_sim, idx_map, preds
 
-with st.spinner("Loading..."):
-    movies, ratings, model, movies_content, cosine_sim, indices, predictions = load_and_train()
-
+with st.spinner("Loading model..."):
+    movies, ratings, svd_model, mc, cos_sim, idx_map, preds = setup()
 st.success("Ready!")
+st.divider()
 
-# hybrid recommendation function
-def recommend_hybrid(user_id, title, n, cf_w, cb_w):
+# Hybrid Recommender
+def hybrid(user_id, title, n=10, cf_w=0.6, cb_w=0.4):
     all_movies  = ratings['movieId'].unique()
     watched     = ratings[ratings['userId'] == user_id]['movieId'].values
     not_watched = [m for m in all_movies if m not in watched]
 
-    # CF scores normalized 0 to 1
-    cf_scores = {m: model.predict(user_id, m).est for m in not_watched}
-    cf_min, cf_max = min(cf_scores.values()), max(cf_scores.values())
-    cf_norm = {m: (s - cf_min) / (cf_max - cf_min + 1e-9) for m, s in cf_scores.items()}
+    # CF scores
+    cf = {m: svd_model.predict(user_id, m).est for m in not_watched}
+    lo, hi = min(cf.values()), max(cf.values())
+    cf_norm = {m: (s - lo) / (hi - lo + 1e-9) for m, s in cf.items()}
 
-    # CB scores normalized 0 to 1
-    cb_scores = {}
-    if title in indices:
-        idx = indices[title]
-        for i, score in enumerate(cosine_sim[idx]):
-            mid = movies_content.iloc[i]['movieId']
+    # CB scores
+    cb = {}
+    if title in idx_map:
+        for i, score in enumerate(cos_sim[idx_map[title]]):
+            mid = mc.iloc[i]['movieId']
             if mid in cf_norm:
-                cb_scores[mid] = score
+                cb[mid] = score
 
-    cb_vals = list(cb_scores.values()) if cb_scores else [0]
-    cb_min, cb_max = min(cb_vals), max(cb_vals)
-    cb_norm = {m: (s - cb_min) / (cb_max - cb_min + 1e-9) for m, s in cb_scores.items()}
+    lo2, hi2 = (min(cb.values()), max(cb.values())) if cb else (0, 1)
+    cb_norm = {m: (s - lo2) / (hi2 - lo2 + 1e-9) for m, s in cb.items()}
 
-    # combine scores
-    hybrid_scores = {
-        m: cf_w * cf_norm[m] + cb_w * cb_norm.get(m, 0)
-        for m in cf_norm
-    }
+    # Combine
+    scores = {m: cf_w * cf_norm[m] + cb_w * cb_norm.get(m, 0) for m in cf_norm}
+    top    = sorted(scores.items(), key=lambda x: x[1], reverse=True)[:n]
 
-    top = sorted(hybrid_scores.items(), key=lambda x: x[1], reverse=True)[:n]
-
-    result = []
+    rows = []
     for mid, score in top:
-        info = movies[movies['movieId'] == mid]
-        if len(info) == 0:
+        row = movies[movies['movieId'] == mid]
+        if row.empty:
             continue
-        result.append({
-            'Title':        info['title'].values[0],
-            'Genres':       info['genres'].values[0],
-            'Hybrid Score': round(score, 4)
+        rows.append({
+            'Title':  row['title'].values[0],
+            'Genres': row['genres'].values[0],
+            'Score':  round(score, 3)
         })
+    return pd.DataFrame(rows)
 
-    return pd.DataFrame(result)
+# Inputs
+col1, col2 = st.columns(2)
+with col1:
+    user_id = st.number_input("User ID", min_value=1, max_value=943, value=1)
+with col2:
+    n_recs  = st.slider("Number of Recommendations", 5, 20, 10)
 
-# user inputs
-user_id     = st.number_input("User ID", min_value=1, max_value=943, value=1, step=1)
-movie_title = st.selectbox("Select Movie", sorted(indices.index.tolist()))
-n_recs      = st.slider("Number of Recommendations", 5, 20, 10)
+movie_title = st.selectbox("Pick a movie you like", sorted(idx_map.index.tolist()))
 
-
-# tabs
+# Tabs
 tab1, tab2 = st.tabs(["Recommendations", "Evaluation"])
 
 with tab1:
-    if st.button("Get Recommendations"):
-        with st.spinner("Generating..."):
-            df = recommend_hybrid(user_id, movie_title, n_recs, cf_w=0.6, cb_w=0.4)
-        st.dataframe(df, use_container_width=True)
+    if st.button("Get Recommendations", use_container_width=True):
+        with st.spinner("Finding movies."):
+            df = hybrid(user_id, movie_title, n_recs)
+        st.dataframe(df, use_container_width=True, hide_index=True)
 
 with tab2:
-    actual    = [pred.r_ui for pred in predictions]
-    estimated = [pred.est  for pred in predictions]
-    rmse = root_mean_squared_error(actual, estimated)
+    actual    = [p.r_ui for p in preds]
+    estimated = [p.est  for p in preds]
+    rmse = np.sqrt(mean_squared_error(actual, estimated))
     mae  = mean_absolute_error(actual, estimated)
 
-    st.metric("RMSE", f"{rmse:.4f}")
-    st.metric("MAE",  f"{mae:.4f}")
+    c1, c2 = st.columns(2)
+    c1.metric("RMSE", f"{rmse:.4f}")
+    c2.metric("MAE",  f"{mae:.4f}")
